@@ -22,6 +22,9 @@ export interface AgentConfig {
   negotiator?: Negotiator;
   /** Snake move brain. Omit to use a built-in greedy-toward-food mover. */
   mover?: Mover;
+  /** Where to persist the agent token so restarts reuse it instead of hitting
+   *  WALLET_ALREADY_REGISTERED. Defaults to a per-agent file in the temp dir. */
+  tokenFile?: string;
   /** Optional logger; defaults to console. */
   log?: (...args: unknown[]) => void;
 }
