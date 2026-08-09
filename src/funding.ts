@@ -107,18 +107,32 @@ export async function fundDeal(opts: {
     }
   }
 
-  const joinTx = await wallet.writeContract({
-    address: factory,
-    abi: FACTORY_ABI,
-    functionName: "joinGame",
-    args: [
-      BigInt(opts.memo.gameId),
-      BigInt(opts.memo.nonce),
-      BigInt(opts.memo.deadline),
-      opts.memo.signature as Hex,
-    ],
-    value,
-  });
+  let joinTx: Hex | undefined;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      joinTx = await wallet.writeContract({
+        address: factory,
+        abi: FACTORY_ABI,
+        functionName: "joinGame",
+        args: [
+          BigInt(opts.memo.gameId),
+          BigInt(opts.memo.nonce),
+          BigInt(opts.memo.deadline),
+          opts.memo.signature as Hex,
+        ],
+        value,
+      });
+      break;
+    } catch (error) {
+      // Public RPC load balancers can serve the approval receipt from one node
+      // while another still estimates joinGame against the previous allowance.
+      // Only retry that narrow post-approval race; every other revert is real.
+      const message = error instanceof Error ? error.message : String(error);
+      if (!approveTx || attempt === 5 || !/fb8f41b2|allowance/i.test(message)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+  }
+  if (!joinTx) throw new Error("joinGame was not submitted");
   await pub.waitForTransactionReceipt({ hash: joinTx });
 
   return { approveTx, joinTx };

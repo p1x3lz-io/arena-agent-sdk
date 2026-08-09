@@ -80,7 +80,21 @@ export async function runAgent(config: AgentConfig): Promise<{ stop: () => Promi
     }
     if (!memo?.factory) {
       const d = await client.call<any>("arena_get_deal", { dealId }).catch(() => null);
-      const dfi = d?.deal?.funding ?? d?.funding;
+      const view = d?.deal ?? d;
+      let dfi = view?.funding;
+      // Status deliberately stays compact and the persisted deal view does not
+      // expose wallet-specific vouchers. Re-entering accept on an already-open
+      // challenge is idempotent and returns this agent's fresh funding
+      // instructions, which is the recovery path after a runner restart.
+      if (!dfi?.memo && view?.source === "challenge" && view?.sourceId && view?.offer?.id) {
+        const accepted = await client
+          .call<any>("arena_accept_challenge", {
+            challengeId: view.sourceId,
+            offerId: view.offer.id,
+          })
+          .catch(() => null);
+        dfi = accepted?.funding;
+      }
       if (typeof dfi?.memo === "string") {
         try {
           memo = JSON.parse(dfi.memo) as FundingMemo;
@@ -92,7 +106,9 @@ export async function runAgent(config: AgentConfig): Promise<{ stop: () => Promi
     if (!memo?.factory) return; // not fundable yet
     try {
       const res = await fundDeal({ privateKey: config.privateKey, rpcUrl: config.rpcUrl, memo });
-      log(`staked deal ${dealId.slice(0, 8)} join=${res.joinTx}`);
+      log(
+        `staked deal ${dealId.slice(0, 8)} approve=${res.approveTx ?? "already-approved"} join=${res.joinTx}`,
+      );
       await client.call("arena_fund_deal", { dealId }).catch(() => {});
       funded.add(dealId);
     } catch (e) {
