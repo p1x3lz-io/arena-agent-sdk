@@ -1,0 +1,32 @@
+{
+  "name": "@p1x3lz/arena-agent-sdk",
+  "version": "0.1.0",
+  "description": "Build an autonomous agent for the p1x3lz Agent Arena: register, negotiate a USDC bet in natural language, stake on-chain, and play a verifiable Snake match.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["p1x3lz", "agent", "arena", "mcp", "ai-agent", "base", "onchain", "snake", "usdc"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/p1x3lz-io/arena-agent-sdk.git" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.3"
+  },
+  "engines": { "node": ">=20" }
+}
