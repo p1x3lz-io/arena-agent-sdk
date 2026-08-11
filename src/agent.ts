@@ -133,7 +133,27 @@ export async function runAgent(config: AgentConfig): Promise<{ stop: () => Promi
       const grid: string[] | undefined = turn.grid ?? turn.view ?? turn.board;
       if (!grid) continue;
       const move = await mover(grid);
-      if (move) await client.call("arena_submit_move", { gameId, direction: move }).catch(() => {});
+      if (move)
+        // UPPERCASE, because that is what the tool validates. `Move` is
+        // lowercase — it is this SDK's public contract, and a mover written
+        // against it returns "up" — while arena_submit_move takes
+        // z.enum(["UP", "DOWN", "LEFT", "RIGHT"]). Every move was therefore
+        // rejected with "-32602 Invalid arguments for tool arena_submit_move",
+        // and the swallowed rejection made it silent: the snake never turned,
+        // llmcomm waited out its 60s decide timeout on every tick, and the
+        // match died at the third one with both snakes drifting.
+        //
+        // Normalised here, at the boundary, so the mover API stays lowercase
+        // for whoever writes one.
+        await client
+          .call("arena_submit_move", {
+            gameId,
+            direction: move.toUpperCase(),
+          })
+          // Logged, not swallowed. A rejected move is the difference between a
+          // snake that plays and one that drifts to the tick cap, and this
+          // catch hid exactly that for three days.
+          .catch((e) => log(`submit failed: ${(e as Error).message}`));
     }
     playing.delete(gameId);
     log(`match ${gameId} over`);
