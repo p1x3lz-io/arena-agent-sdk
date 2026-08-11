@@ -126,33 +126,44 @@ export async function runAgent(config: AgentConfig): Promise<{ stop: () => Promi
       let turn: any;
       try {
         turn = await client.call("arena_await_turn", { gameId });
-      } catch {
+      } catch (e) {
+        log(`await_turn failed: ${(e as Error).message}`);
         break;
       }
-      if (!turn || turn.finished || turn.gameOver || turn.result || turn.ended) break;
-      const grid: string[] | undefined = turn.grid ?? turn.view ?? turn.board;
+      if (
+        !turn ||
+        turn.status === "MATCH_FINISHED" ||
+        turn.status === "finished" ||
+        turn.finished ||
+        turn.gameOver ||
+        turn.result ||
+        turn.ended
+      )
+        break;
+      // The arena serves the board as `observation` (an ASCII string). A
+      // `status: "waiting"` reply carries no observation — loop and poll again.
+      // The older grid/view/board names never existed on this payload, so the
+      // snake never got a board, never submitted a move, and was disqualified
+      // for AFK at tick 2.
+      const grid: string | string[] | undefined =
+        turn.observation ?? turn.grid ?? turn.view ?? turn.board;
       if (!grid) continue;
       const move = await mover(grid);
       if (move)
         // UPPERCASE, because that is what the tool validates. `Move` is
-        // lowercase — it is this SDK's public contract, and a mover written
-        // against it returns "up" — while arena_submit_move takes
-        // z.enum(["UP", "DOWN", "LEFT", "RIGHT"]). Every move was therefore
-        // rejected with "-32602 Invalid arguments for tool arena_submit_move",
-        // and the swallowed rejection made it silent: the snake never turned,
-        // llmcomm waited out its 60s decide timeout on every tick, and the
-        // match died at the third one with both snakes drifting.
-        //
-        // Normalised here, at the boundary, so the mover API stays lowercase
-        // for whoever writes one.
+        // lowercase — it is this SDK's public contract, and a custom mover
+        // returns "up" — while arena_submit_move takes z.enum(["UP", "DOWN",
+        // "LEFT", "RIGHT"]). Every move was therefore rejected with
+        // "-32602 Invalid arguments", and the swallowed rejection below made it
+        // silent: the snake never turned, llmcomm waited out its 60s decide
+        // timeout on every tick, and the match died at the third one with both
+        // snakes drifting. Normalised here, at the boundary, so the mover API
+        // stays lowercase for whoever writes one.
         await client
           .call("arena_submit_move", {
             gameId,
             direction: move.toUpperCase(),
           })
-          // Logged, not swallowed. A rejected move is the difference between a
-          // snake that plays and one that drifts to the tick cap, and this
-          // catch hid exactly that for three days.
           .catch((e) => log(`submit failed: ${(e as Error).message}`));
     }
     playing.delete(gameId);
@@ -160,6 +171,7 @@ export async function runAgent(config: AgentConfig): Promise<{ stop: () => Promi
   }
 
   let posted = false;
+  let myChallengeId: string | null = null; // our own open challenge, if any
   const joined = new Set<string>(); // challenges whose party we already joined
 
   async function engage(chId: string): Promise<void> {
@@ -224,32 +236,58 @@ export async function runAgent(config: AgentConfig): Promise<{ stop: () => Promi
         }
         // 2) Play any live match.
         for (const g of st?.liveMatches ?? st?.activeGames ?? []) {
-          const gid = g.gameId ?? g.id ?? g.matchId;
+          // The arena reports a live match keyed by `gameRef` (= the deal's
+          // game_ref); arena_await_turn/arena_submit_move look the match up via
+          // findByGameRef(gameId), so gameId MUST be that gameRef. The older
+          // gameId/id/matchId names never exist on this payload — reading them
+          // left `gid` undefined, play() was never entered, no moves were ever
+          // submitted, and both snakes were disqualified for AFK at tick 2.
+          const gid = g.gameRef ?? g.gameId ?? g.dealId ?? g.id ?? g.matchId;
           if (gid) play(gid).catch((e) => log("play:", (e as Error).message));
         }
 
-        // 3) Matchmake. One negotiation at a time: only engage when free, and
-        //    prefer joining an existing challenge over opening our own.
-        const negotiating = (st?.openNegotiations ?? []).length > 0;
-        if (!negotiating) {
+        // 3) Matchmake. One MATCH at a time — but negotiate freely: an agent may
+        //    hold its own challenge AND join others, and let them race to a deal.
+        //    We only stop looking once actually committed to a live match (the
+        //    arena refuses a second deal at birth, so this is the SDK mirroring
+        //    that invariant rather than deadlocking on our own open challenge).
+        const inLiveMatch =
+          (st?.liveMatches ?? st?.activeGames ?? []).length > 0 || playing.size > 0;
+        if (!inLiveMatch) {
           const fm = await client.call<any>("arena_find_match", { maxStake: String(maxStake) }).catch(() => null);
           const routes = fm?.affordable ?? fm?.matches ?? fm?.routes ?? (Array.isArray(fm) ? fm : []);
           const route = routes.find((r: any) => !skip.has(r.challengeId ?? r.id));
+          // Re-arm posting once our previous challenge is done. `posted` is a
+          // one-shot latch, so without this an agent posts a single challenge
+          // for its whole lifetime — the moment every agent's one challenge has
+          // resolved (a match, or expiry) nobody re-posts and the arena goes
+          // silent. Reset only on an explicit terminal status so a flaky read
+          // never spams new challenges.
+          if (posted && myChallengeId) {
+            const ch = await client
+              .call<any>("arena_get_challenge", { challengeId: myChallengeId })
+              .catch(() => null);
+            const status = String(ch?.challenge?.status ?? ch?.status ?? "").toUpperCase();
+            if (["EXPIRED", "CLOSED", "ABORTED", "SETTLED", "CANCELLED", "CANCELED", "DONE"].includes(status)) {
+              posted = false;
+              myChallengeId = null;
+            }
+          }
           if (route) {
             await engage(route.challengeId ?? route.id ?? route.challenge?.id);
           } else if (config.openStake != null && !posted) {
             const s = Math.min(config.openStake, maxStake);
             await client
-              .call("arena_post_challenge", { stakeMin: String(s), stakeMax: String(s), seats: 2, message: `${config.name} wants a match.` })
-              .then(() => {
+              .call<any>("arena_post_challenge", { stakeMin: String(s), stakeMax: String(s), seats: 2, message: `${config.name} wants a match.` })
+              .then((res: any) => {
                 posted = true;
+                myChallengeId = res?.challengeId ?? res?.challenge?.id ?? res?.id ?? null;
                 log(`posted challenge @ ${s} USDC`);
               })
               .catch(() => {});
           }
-        } else if (st.openNegotiations) {
-          // We're in a negotiation — try to close any that is ours to accept.
-          for (const n of st.openNegotiations) {
+          // Push every negotiation we are party to toward a close as well.
+          for (const n of st?.openNegotiations ?? []) {
             const chId = n.challengeId ?? n.id;
             if (chId && !skip.has(chId)) await engage(chId);
           }

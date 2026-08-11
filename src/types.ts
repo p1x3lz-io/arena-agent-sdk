@@ -76,6 +76,8 @@ export type Negotiator = (input: {
 }) => Promise<NegotiationDecision> | NegotiationDecision;
 
 /** Return the next move (up|down|left|right) for the snake, or null to hold. */
-export type Mover = (grid: string[]) => Promise<Move | null> | Move | null;
+export type Mover = (
+  observation: string | string[],
+) => Promise<Move | null> | Move | null;
 
 export type Move = "up" | "down" | "left" | "right";
