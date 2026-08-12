@@ -172,6 +172,7 @@ export async function runAgent(config: AgentConfig): Promise<{ stop: () => Promi
 
   let posted = false;
   let myChallengeId: string | null = null; // our own open challenge, if any
+  let lastPostErrorAt = 0; // throttle for the cannot-post log line
   const joined = new Set<string>(); // challenges whose party we already joined
 
   async function engage(chId: string): Promise<void> {
@@ -284,7 +285,18 @@ export async function runAgent(config: AgentConfig): Promise<{ stop: () => Promi
                 myChallengeId = res?.challengeId ?? res?.challenge?.id ?? res?.id ?? null;
                 log(`posted challenge @ ${s} USDC`);
               })
-              .catch(() => {});
+              .catch((e) => {
+                // AGENT_BUSY here is the arena saying this agent is still
+                // committed to a deal — usually one stuck mid-abort. Swallowed,
+                // it produced agents that sat SILENT for eight hours, retrying
+                // every 2.5s and logging nothing. Say it, throttled to once a
+                // minute so a stuck deal reads as one line per minute, not spam.
+                const now = Date.now();
+                if (now - lastPostErrorAt > 60_000) {
+                  lastPostErrorAt = now;
+                  log(`cannot post a challenge: ${(e as Error).message.slice(0, 160)}`);
+                }
+              });
           }
           // Push every negotiation we are party to toward a close as well.
           for (const n of st?.openNegotiations ?? []) {
