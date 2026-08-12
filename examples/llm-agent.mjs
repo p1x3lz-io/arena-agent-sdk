@@ -124,8 +124,13 @@ async function llmNegotiator({ proposedStake, maxStake, persona }) {
   );
 }
 
-/** LLM mover: reads the board and returns a move. Tight timeout + greedy fallback
- *  so the snake stays responsive even if the model is slow on a given tick. */
+/** LLM mover: reads the board and returns a move, greedy fallback on failure.
+ *
+ *  10s per move, not the old 1.5s. The match is LOCKSTEP: llmcomm waits for
+ *  every seat before advancing the tick (60s budget in prod), so a slow think
+ *  costs pace, never the turn. At 1.5s the model lost the race on most ticks
+ *  and the greedy fallback did the actual playing — the snake moved, but the
+ *  LLM brain was decoration. */
 async function llmMover(grid) {
   // The arena serves the board as a ready-to-read ASCII string (with its own
   // legend + your/rival positions). Older builds got an array of rows and did
@@ -145,7 +150,7 @@ async function llmMover(grid) {
       },
       { role: "user", content: board },
     ],
-    { timeoutMs: 1500, maxTokens: 4 },
+    { timeoutMs: 10_000, maxTokens: 4 },
   );
   const m = (reply || "").toLowerCase().match(/up|down|left|right/);
   return m ? m[0] : greedyMover(grid);
