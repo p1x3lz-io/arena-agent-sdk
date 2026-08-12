@@ -8,14 +8,18 @@
 //
 //   ARENA_URL=https://arena.p1x3lz.io/mcp \
 //   RPC_URL=https://sepolia.base.org \
-//   OPENROUTER_API_KEY=sk-or-... \
+//   LLM_BASE_URL=https://openrouter.ai/api/v1 \
+//   LLM_API_KEY=sk-or-... \
 //   MODEL=openai/gpt-4o-mini \
 //   AGENT_NAME=Cobra AGENT_PRIVATE_KEY=0x... \
 //   MAX_STAKE=5 OPEN_STAKE=2 PERSONA="a sharp, frugal negotiator" \
+//   SYSTEM_PROMPT="Play defensively: survive, farm food, avoid clashes." \
 //   node examples/llm-agent.mjs
 //
-// Swap MODEL for any OpenRouter slug to change the brain. That is the whole
-// point of the SDK: bring a wallet + an LLM, get an autonomous arena agent.
+// Everything is configurable via env: the LLM backend (LLM_BASE_URL, any
+// OpenAI-compatible API), its key (LLM_API_KEY), the model (MODEL), how the
+// agent negotiates (PERSONA) and how it plays (SYSTEM_PROMPT). Bring a wallet
+// + an LLM, get an autonomous arena agent.
 
 import { runAgent, greedyMover } from "../dist/index.js";
 
@@ -25,29 +29,54 @@ const {
   RPC_URL = "https://sepolia.base.org",
   AGENT_NAME = "LlmAgent",
   MODEL = "openai/gpt-4o-mini",
+  // The LLM backend is fully configurable. Point LLM_BASE_URL at any
+  // OpenAI-compatible chat-completions API (OpenRouter, OpenAI, a local
+  // llama.cpp/vLLM server, ...). LLM_API_KEY is the credential for it;
+  // OPENROUTER_API_KEY is kept as a fallback for back-compat.
+  LLM_BASE_URL = "https://openrouter.ai/api/v1",
+  LLM_API_KEY,
   OPENROUTER_API_KEY,
   MAX_STAKE,
   OPEN_STAKE,
   PERSONA = "a sharp, competitive Snake player who negotiates hard but fairly",
+  // SYSTEM_PROMPT defines the agent's TYPE OF PLAY — its in-match strategy, fed
+  // to the LLM that drives the snake. Change it to change how the agent plays
+  // (hunt the rival, farm food, play defensively, control the centre, ...).
+  // The immutable board mechanics + output contract are always kept around it
+  // so a custom prompt can shape strategy without breaking the protocol.
+  SYSTEM_PROMPT,
 } = process.env;
 
+// The strategy half of the mover's system prompt: SYSTEM_PROMPT if you set one,
+// otherwise the default "survive and eat" playstyle.
+const STRATEGY =
+  SYSTEM_PROMPT?.trim() ||
+  "SURVIVE and EAT: every pellet is worth 100 points, so pick the safe move " +
+    "that closes the distance to the nearest food. Stay away from the rival's " +
+    "head — a head-on collision kills you. Repeating your current heading tick " +
+    "after tick is the losing strategy — decide fresh from the board every turn.";
+
+const apiKey = LLM_API_KEY || OPENROUTER_API_KEY;
 if (!AGENT_PRIVATE_KEY) throw new Error("set AGENT_PRIVATE_KEY");
-if (!OPENROUTER_API_KEY) throw new Error("set OPENROUTER_API_KEY");
+if (!apiKey) throw new Error("set LLM_API_KEY (or OPENROUTER_API_KEY)");
 
 const maxStake = MAX_STAKE ? Number(MAX_STAKE) : 5;
 const tag = `[${AGENT_NAME}:${MODEL}]`;
+// Normalise the base URL (drop any trailing slash) and derive the endpoint.
+const chatUrl = `${LLM_BASE_URL.replace(/\/+$/, "")}/chat/completions`;
 
-/** One OpenRouter chat call. Returns the assistant text, or null on any failure
- *  so the caller can fall back to a safe deterministic choice. */
+/** One chat-completions call to the configured LLM backend. Returns the
+ *  assistant text, or null on any failure so the caller can fall back to a
+ *  safe deterministic choice. */
 async function chat(messages, { timeoutMs = 8000, maxTokens = 200 } = {}) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const res = await fetch(chatUrl, {
       method: "POST",
       signal: ctrl.signal,
       headers: {
-        authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
         "x-title": "p1x3lz-arena-agent",
       },
@@ -216,15 +245,14 @@ async function llmMover(grid) {
       {
         role: "system",
         content:
+          // --- immutable board mechanics (always present) ---
           "You control a snake on a wrapping grid (stepping off one edge reappears " +
           "on the opposite side — there are no walls). Legend: @=your head, " +
           "o=your body, X=rival head, x=rival body, *=food, .=empty. Row 0 is " +
-          "the top; up decreases y. SURVIVE and EAT: every pellet is worth 100 " +
-          "points, so pick the safe move that closes the distance to the " +
-          "nearest food. Never step onto a body, and stay away from the " +
-          "rival's head — a head-on collision kills you. Repeating your " +
-          "current heading tick after tick is the losing strategy — decide " +
-          "fresh from the board every turn. " +
+          "the top; up decreases y. Never step onto a body.\n" +
+          // --- strategy: SYSTEM_PROMPT or the default survive-and-eat playstyle ---
+          `Strategy: ${STRATEGY}\n` +
+          // --- immutable output contract (always present) ---
           "Answer with ONE word only: up, down, left, or right.",
       },
       { role: "user", content: [board, foodAdvice(board), vector, history].filter(Boolean).join("\n") },
@@ -254,7 +282,8 @@ const agent = await runAgent({
   mover: llmMover,
 });
 
-console.log(tag, "running — LLM brain online");
+console.log(tag, `running — LLM brain online via ${chatUrl}`);
+console.log(tag, `play strategy: ${SYSTEM_PROMPT?.trim() ? "custom SYSTEM_PROMPT" : "default (survive & eat)"}`);
 process.on("SIGINT", async () => {
   await agent.stop();
   process.exit(0);
