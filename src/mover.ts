@@ -10,10 +10,12 @@ import type { Move } from "./types.js";
  * other), and there is no food — it is a survival/PvP snake. Row 0 is the top;
  * `up` decreases y.
  *
- * Strategy: step onto an empty cell (never into a body/head), and among the
- * safe options head toward the nearest rival head to force the action. Good
- * enough to keep the snake alive and moving; swap in your own `Mover` for
- * anything smarter. Accepts the raw observation string or a pre-split row array.
+ * Strategy: survive and eat. Step onto an empty or food cell (never into a
+ * body/head, never voluntarily beside a rival head), and among the safe
+ * options head toward the nearest food pellet — the rival's head becomes the
+ * target only on a bare board. Good enough to keep the snake alive, moving
+ * and scoring; swap in your own `Mover` for anything smarter. Accepts the raw
+ * observation string or a pre-split row array.
  */
 export function greedyMover(input: string | string[]): Move | null {
   const lines = (typeof input === "string" ? input.split("\n") : input).map((r) =>
@@ -21,17 +23,19 @@ export function greedyMover(input: string | string[]): Move | null {
   );
   // Keep only the board rows — lines made entirely of cell glyphs. This drops
   // the tick header, the legend, and the "you: … / rival: …" footers.
-  const rows = lines.filter((r) => r.length > 0 && /^[@oXx.]+$/.test(r));
+  const rows = lines.filter((r) => r.length > 0 && /^[@oXx.*]+$/.test(r));
   if (rows.length === 0) return null;
 
   const height = rows.length;
   let head: { x: number; y: number } | null = null;
   const rivals: { x: number; y: number }[] = [];
+  const food: { x: number; y: number }[] = [];
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < rows[y].length; x++) {
       const c = rows[y][x];
       if (c === "@") head = { x, y };
       else if (c === "X") rivals.push({ x, y });
+      else if (c === "*") food.push({ x, y });
     }
   }
   if (!head) return null;
@@ -50,20 +54,33 @@ export function greedyMover(input: string | string[]): Move | null {
     { move: "left", x: head.x - 1, y: head.y },
     { move: "right", x: head.x + 1, y: head.y },
   ];
-  const candidates = options.filter((c) => cellAt(c.x, c.y) === "."); // only empty cells
+  // Empty and food cells are both walkable — stepping onto a pellet IS eating.
+  const candidates = options.filter((c) => cellAt(c.x, c.y) === "." || cellAt(c.x, c.y) === "*");
 
   if (candidates.length === 0) return null;
-  if (rivals.length === 0) return candidates[0].move;
 
   const width = rows[head.y].length;
   const wrapDist = (ax: number, ay: number, bx: number, by: number): number =>
     Math.min(Math.abs(ax - bx), width - Math.abs(ax - bx)) +
     Math.min(Math.abs(ay - by), height - Math.abs(ay - by));
 
-  candidates.sort((a, b) => {
-    const da = Math.min(...rivals.map((r) => wrapDist(a.x, a.y, r.x, r.y)));
-    const db = Math.min(...rivals.map((r) => wrapDist(b.x, b.y, r.x, r.y)));
+  // Food first: pellets are where the points are (100 each, same economy as
+  // the human ladder), and a snake that eats grows into a wall the rival has
+  // to respect. The rival's head is only the target when the board is bare —
+  // and never something to step next to voluntarily: any candidate adjacent
+  // to a rival head risks a head-on collision the engine settles against us.
+  const targets = food.length > 0 ? food : rivals;
+  const risky = (c: { x: number; y: number }): boolean =>
+    rivals.some((r) => wrapDist(c.x, c.y, r.x, r.y) <= 1);
+  const pool = candidates.filter((c) => !risky(c)).length > 0
+    ? candidates.filter((c) => !risky(c))
+    : candidates;
+  if (targets.length === 0) return pool[0].move;
+
+  pool.sort((a, b) => {
+    const da = Math.min(...targets.map((t) => wrapDist(a.x, a.y, t.x, t.y)));
+    const db = Math.min(...targets.map((t) => wrapDist(b.x, b.y, t.x, t.y)));
     return da - db;
   });
-  return candidates[0].move;
+  return pool[0].move;
 }
