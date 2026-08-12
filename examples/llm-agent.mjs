@@ -162,16 +162,43 @@ function rivalVector(board) {
   const dy = wrap(Number(rival[2]) - Number(you[2]), h);
   const xWord = dx === 0 ? "same column" : `${Math.abs(dx)} ${dx > 0 ? "right" : "left"}`;
   const yWord = dy === 0 ? "same row" : `${Math.abs(dy)} ${dy > 0 ? "down" : "up"}`;
-  // Name the closing moves outright. A small model told only the vector still
-  // parrots its current heading; told "the hunting moves are up and right" it
-  // has to actively reject the hunt to keep drifting.
-  const closing = [];
-  if (dx > 0) closing.push("right");
-  if (dx < 0) closing.push("left");
-  if (dy > 0) closing.push("down");
-  if (dy < 0) closing.push("up");
-  const hunt = closing.length ? ` Moves that close the gap: ${closing.join(", ")}.` : "";
-  return `Rival head, shortest wrapped path: ${xWord}, ${yWord}.${hunt}`;
+  return `Rival head, shortest wrapped path: ${xWord}, ${yWord} — keep clear of it.`;
+}
+
+/** The nearest pellet and the moves that reach it, from the observation's own
+ *  "food: (x,y) …" footer. Named outright: a small model told only a vector
+ *  still parrots its current heading; told "the eating moves are up and
+ *  right" it has to actively reject the meal to keep drifting. */
+function foodAdvice(board) {
+  const you = board.match(/you: .*?head \((\d+),(\d+)\)/);
+  const size = board.match(/grid (\d+)x(\d+)/);
+  const line = board.match(/^food: (.+)$/m);
+  if (!you || !size || !line) return null;
+  const [w, h] = [Number(size[1]), Number(size[2])];
+  const wrap = (d, span) => {
+    let v = d % span;
+    if (v > span / 2) v -= span;
+    if (v < -span / 2) v += span;
+    return v;
+  };
+  const me = { x: Number(you[1]), y: Number(you[2]) };
+  let best = null;
+  for (const m of line[1].matchAll(/\((\d+),(\d+)\)/g)) {
+    const dx = wrap(Number(m[1]) - me.x, w);
+    const dy = wrap(Number(m[2]) - me.y, h);
+    const dist = Math.abs(dx) + Math.abs(dy);
+    if (!best || dist < best.dist) best = { dx, dy, dist, x: m[1], y: m[2] };
+  }
+  if (!best) return null;
+  const moves = [];
+  if (best.dx > 0) moves.push("right");
+  if (best.dx < 0) moves.push("left");
+  if (best.dy > 0) moves.push("down");
+  if (best.dy < 0) moves.push("up");
+  return (
+    `Nearest food at (${best.x},${best.y}), ${best.dist} cells away.` +
+    (moves.length ? ` Moves that reach it: ${moves.join(", ")}.` : "")
+  );
 }
 
 async function llmMover(grid) {
@@ -191,14 +218,16 @@ async function llmMover(grid) {
         content:
           "You control a snake on a wrapping grid (stepping off one edge reappears " +
           "on the opposite side — there are no walls). Legend: @=your head, " +
-          "o=your body, X=rival head, x=rival body, .=empty. Row 0 is the top; " +
-          "up decreases y. Never step onto your own body or the rival. Your job " +
-          "is to HUNT: pick the safe move that closes the wrapped distance to " +
-          "the rival's head. Repeating your current heading tick after tick is " +
-          "the losing strategy — decide fresh from the board every turn. " +
+          "o=your body, X=rival head, x=rival body, *=food, .=empty. Row 0 is " +
+          "the top; up decreases y. SURVIVE and EAT: every pellet is worth 100 " +
+          "points, so pick the safe move that closes the distance to the " +
+          "nearest food. Never step onto a body, and stay away from the " +
+          "rival's head — a head-on collision kills you. Repeating your " +
+          "current heading tick after tick is the losing strategy — decide " +
+          "fresh from the board every turn. " +
           "Answer with ONE word only: up, down, left, or right.",
       },
-      { role: "user", content: [board, vector, history].filter(Boolean).join("\n") },
+      { role: "user", content: [board, foodAdvice(board), vector, history].filter(Boolean).join("\n") },
     ],
     { timeoutMs: 10_000, maxTokens: 8 },
   );
