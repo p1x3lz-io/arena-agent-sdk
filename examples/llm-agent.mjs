@@ -130,13 +130,60 @@ async function llmNegotiator({ proposedStake, maxStake, persona }) {
  *  every seat before advancing the tick (60s budget in prod), so a slow think
  *  costs pace, never the turn. At 1.5s the model lost the race on most ticks
  *  and the greedy fallback did the actual playing — the snake moved, but the
- *  LLM brain was decoration. */
+ *  LLM brain was decoration.
+ *
+ *  The prompt has to FORCE a decision. The observation's footer ends with
+ *  "heading LEFT", and a small model shown that will answer "left" — measured
+ *  at 5/5 on a live board, and a whole production match where one seat
+ *  submitted the same direction 256 ticks out of 257. On a wrapping grid a
+ *  straight line never dies, so the snake "plays" every tick and looks frozen.
+ *  So the board is augmented with the wrapped vector to the rival and the
+ *  agent's own recent moves, and the instruction names the failure mode. */
+let recentMoves = [];
+
+function rivalVector(board) {
+  // Both positions come from the observation's structured footer lines:
+  //   you: pid 2, head (0,14), heading LEFT, ...
+  //   rival: pid 1, head (10,5), heading UP, ...
+  const you = board.match(/you: .*?head \((\d+),(\d+)\)/);
+  const rival = board.match(/rival: .*?head \((\d+),(\d+)\)/);
+  const size = board.match(/grid (\d+)x(\d+)/);
+  if (!you || !rival || !size) return null;
+  const [w, h] = [Number(size[1]), Number(size[2])];
+  // Shortest wrapped delta on each axis: the toroidal board means the rival
+  // can be closer through the edge than across the middle.
+  const wrap = (d, span) => {
+    let v = d % span;
+    if (v > span / 2) v -= span;
+    if (v < -span / 2) v += span;
+    return v;
+  };
+  const dx = wrap(Number(rival[1]) - Number(you[1]), w);
+  const dy = wrap(Number(rival[2]) - Number(you[2]), h);
+  const xWord = dx === 0 ? "same column" : `${Math.abs(dx)} ${dx > 0 ? "right" : "left"}`;
+  const yWord = dy === 0 ? "same row" : `${Math.abs(dy)} ${dy > 0 ? "down" : "up"}`;
+  // Name the closing moves outright. A small model told only the vector still
+  // parrots its current heading; told "the hunting moves are up and right" it
+  // has to actively reject the hunt to keep drifting.
+  const closing = [];
+  if (dx > 0) closing.push("right");
+  if (dx < 0) closing.push("left");
+  if (dy > 0) closing.push("down");
+  if (dy < 0) closing.push("up");
+  const hunt = closing.length ? ` Moves that close the gap: ${closing.join(", ")}.` : "";
+  return `Rival head, shortest wrapped path: ${xWord}, ${yWord}.${hunt}`;
+}
+
 async function llmMover(grid) {
   // The arena serves the board as a ready-to-read ASCII string (with its own
   // legend + your/rival positions). Older builds got an array of rows and did
   // grid.join("\n"); calling .join on the string threw, killing the turn before
   // any move was submitted, so the snake was disqualified for AFK.
   const board = typeof grid === "string" ? grid : grid.join("\n");
+  const vector = rivalVector(board);
+  const history = recentMoves.length
+    ? `Your last moves: ${recentMoves.join(", ")}.`
+    : "";
   const reply = await chat(
     [
       {
@@ -145,15 +192,23 @@ async function llmMover(grid) {
           "You control a snake on a wrapping grid (stepping off one edge reappears " +
           "on the opposite side — there are no walls). Legend: @=your head, " +
           "o=your body, X=rival head, x=rival body, .=empty. Row 0 is the top; " +
-          "up decreases y. Never step onto your own body or the rival; chase the " +
-          "rival to cut it off. Answer with ONE word only: up, down, left, or right.",
+          "up decreases y. Never step onto your own body or the rival. Your job " +
+          "is to HUNT: pick the safe move that closes the wrapped distance to " +
+          "the rival's head. Repeating your current heading tick after tick is " +
+          "the losing strategy — decide fresh from the board every turn. " +
+          "Answer with ONE word only: up, down, left, or right.",
       },
-      { role: "user", content: board },
+      { role: "user", content: [board, vector, history].filter(Boolean).join("\n") },
     ],
-    { timeoutMs: 10_000, maxTokens: 4 },
+    { timeoutMs: 10_000, maxTokens: 8 },
   );
   const m = (reply || "").toLowerCase().match(/up|down|left|right/);
-  return m ? m[0] : greedyMover(grid);
+  const move = m ? m[0] : greedyMover(grid);
+  if (move) {
+    recentMoves.push(move);
+    if (recentMoves.length > 6) recentMoves.shift();
+  }
+  return move;
 }
 
 const agent = await runAgent({
